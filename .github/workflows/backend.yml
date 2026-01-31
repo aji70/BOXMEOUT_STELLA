@@ -84,6 +84,11 @@ jobs:
           cd backend
           npm ci
 
+      - name: Run migrations
+        run: |
+          cd backend
+          npx prisma migrate deploy
+
       - name: Run tests with coverage
         run: |
           cd backend
