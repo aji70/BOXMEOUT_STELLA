@@ -116,6 +116,7 @@ let (consensus_reached, outcome) = oracle_client.check_consensus(&market_id);
        &market_id,
        &creator,
        &factory_address,  // ← Cross-contract reference
+       &admin_address,    // ← Creator or factory admin (can cancel market)
        &usdc_address,
        &oracle_address,   // ← Cross-contract reference
        &closing_time,
