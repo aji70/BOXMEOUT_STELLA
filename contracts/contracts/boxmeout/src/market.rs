@@ -941,9 +941,10 @@ impl PredictionMarket {
             }
         }
 
-        env.storage()
-            .persistent()
-            .set(&Symbol::new(&env, PARTICIPANTS_KEY), &Vec::<Address>::new(&env));
+        env.storage().persistent().set(
+            &Symbol::new(&env, PARTICIPANTS_KEY),
+            &Vec::<Address>::new(&env),
+        );
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CANCELLED);
@@ -1658,7 +1659,10 @@ mod tests {
 
         market_client.cancel_market(&creator, &market_id_bytes);
 
-        assert_eq!(market_client.get_market_state_value(), Some(STATE_CANCELLED));
+        assert_eq!(
+            market_client.get_market_state_value(),
+            Some(STATE_CANCELLED)
+        );
         assert_eq!(usdc_client.balance(&user), amount);
     }
 
@@ -1694,7 +1698,10 @@ mod tests {
 
         market_client.cancel_market(&admin, &market_id_bytes);
 
-        assert_eq!(market_client.get_market_state_value(), Some(STATE_CANCELLED));
+        assert_eq!(
+            market_client.get_market_state_value(),
+            Some(STATE_CANCELLED)
+        );
         assert_eq!(usdc_client.balance(&user), 300);
     }
 
