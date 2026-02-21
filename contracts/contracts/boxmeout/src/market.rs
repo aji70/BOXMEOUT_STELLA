@@ -876,11 +876,83 @@ impl PredictionMarket {
     /// - Return all user USDC balances (full refund)
     /// - Loop through all users with predictions
     /// - Transfer their full amounts back from escrow
-    /// - Handle any transfer failures (log but continue)
     /// - Set market state to CANCELLED
-    /// - Emit MarketCancelled(market_id, reason, creator, timestamp)
-    pub fn cancel_market(_env: Env, _creator: Address, _market_id: BytesN<32>) {
-        todo!("See cancel market TODO above")
+    /// - Emit MarketCancelled(market_id, creator, timestamp)
+    pub fn cancel_market(env: Env, creator: Address, market_id: BytesN<32>) {
+        creator.require_auth();
+
+        let stored_creator: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, CREATOR_KEY))
+            .expect("Market not initialized");
+        let admin: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_KEY));
+
+        if creator != stored_creator && admin.as_ref() != Some(&creator) {
+            panic!("Unauthorized: only creator or admin can cancel");
+        }
+
+        let state: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .expect("Market state not found");
+
+        if state == STATE_RESOLVED {
+            panic!("Cannot cancel resolved market");
+        }
+        if state == STATE_CANCELLED {
+            panic!("Market already cancelled");
+        }
+
+        let usdc: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .expect("USDC token not found");
+        let token_client = token::TokenClient::new(&env, &usdc);
+        let contract = env.current_contract_address();
+
+        let participants: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, PARTICIPANTS_KEY))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let len = participants.len();
+        for i in 0..len {
+            let user = participants.get(i).expect("participant");
+            if let Some(commitment) = Self::get_commitment(env.clone(), user.clone()) {
+                if commitment.amount > 0 {
+                    token_client.transfer(&contract, &user, &commitment.amount);
+                }
+                env.storage()
+                    .persistent()
+                    .remove(&Self::get_commit_key(&env, &user));
+            } else if let Some(pred) = Self::test_get_prediction(env.clone(), user.clone()) {
+                if pred.amount > 0 {
+                    token_client.transfer(&contract, &user, &pred.amount);
+                }
+                let pred_key = (Symbol::new(&env, PREDICTION_PREFIX), user.clone());
+                env.storage().persistent().remove(&pred_key);
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, PARTICIPANTS_KEY), &Vec::<Address>::new(&env));
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CANCELLED);
+
+        let timestamp = env.ledger().timestamp();
+        env.events().publish(
+            (Symbol::new(&env, "MarketCancelled"),),
+            (market_id, creator, timestamp),
+        );
     }
 
     // --- TEST HELPERS (Not for production use, but exposed for integration tests) ---
@@ -1426,6 +1498,7 @@ mod tests {
             &market_id_bytes,
             &Address::generate(&env),
             &Address::generate(&env),
+            &Address::generate(&env),
             &usdc_client.address,
             &oracle_contract_id,
             &2000,
@@ -1451,6 +1524,7 @@ mod tests {
 
         market_client.initialize(
             &market_id_bytes,
+            &Address::generate(&env),
             &Address::generate(&env),
             &Address::generate(&env),
             &usdc_client.address,
@@ -1492,6 +1566,7 @@ mod tests {
             &market_id_bytes,
             &Address::generate(&env),
             &Address::generate(&env),
+            &Address::generate(&env),
             &usdc_client.address,
             &oracle_contract_id,
             &2000,
@@ -1529,6 +1604,7 @@ mod tests {
             &market_id_bytes,
             &Address::generate(&env),
             &Address::generate(&env),
+            &Address::generate(&env),
             &usdc_client.address,
             &oracle_contract_id,
             &2000,
@@ -1543,5 +1619,136 @@ mod tests {
         let r = result.unwrap();
         assert_eq!(r.predicted_outcome, 0);
         assert_eq!(r.amount, 200);
+    }
+
+    // ============================================================================
+    // CANCEL MARKET TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_cancel_market_creator_refunds_committed() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
+        let creator = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &creator,
+            &Address::generate(&env),
+            &creator,
+            &usdc_client.address,
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        let amount = 500i128;
+        let commit_hash = BytesN::from_array(&env, &[1u8; 32]);
+        usdc_client.mint(&user, &amount);
+        usdc_client.approve(&user, &market_contract_id, &amount, &100);
+        market_client.commit_prediction(&user, &commit_hash, &amount);
+
+        market_client.cancel_market(&creator, &market_id_bytes);
+
+        assert_eq!(market_client.get_market_state_value(), Some(STATE_CANCELLED));
+        assert_eq!(usdc_client.balance(&user), amount);
+    }
+
+    #[test]
+    fn test_cancel_market_admin_refunds_predictions() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
+        let creator = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &creator,
+            &Address::generate(&env),
+            &admin,
+            &usdc_client.address,
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        usdc_client.mint(&market_contract_id, &300);
+        market_client.test_add_participant(&user);
+        market_client.test_set_prediction(&user, &1u32, &300);
+
+        market_client.cancel_market(&admin, &market_id_bytes);
+
+        assert_eq!(market_client.get_market_state_value(), Some(STATE_CANCELLED));
+        assert_eq!(usdc_client.balance(&user), 300);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn test_cancel_market_non_creator_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let creator = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &creator,
+            &Address::generate(&env),
+            &creator,
+            &Address::generate(&env),
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        market_client.cancel_market(&stranger, &market_id_bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot cancel resolved market")]
+    fn test_cancel_market_resolved_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let creator = Address::generate(&env);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &creator,
+            &Address::generate(&env),
+            &creator,
+            &Address::generate(&env),
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+        market_client.test_setup_resolution(&market_id_bytes, &1u32, &100, &0);
+
+        market_client.cancel_market(&creator, &market_id_bytes);
     }
 }
