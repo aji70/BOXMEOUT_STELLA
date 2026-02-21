@@ -18,6 +18,13 @@ import {
   getRedisStatus,
 } from './config/redis.js';
 
+// Import workers (queue, event bridge, job processors)
+import {
+  registerAllWorkers,
+  closeAllWorkers,
+  getEventBridgeService,
+} from './workers/index.js';
+
 // Import ALL middleware
 import {
   securityHeaders,
@@ -231,6 +238,15 @@ async function startServer(): Promise<void> {
     console.log('🔌 Connecting to Redis...');
     await initializeRedis();
 
+    // Start workers (QueueService + JobProcessors)
+    registerAllWorkers();
+
+    // Start EventBridgeService (poll Soroban events)
+    const eventBridge = getEventBridgeService();
+    if (process.env.ENABLE_EVENT_BRIDGE !== 'false') {
+      eventBridge.startPolling();
+    }
+
     // TODO: Initialize Prisma/Database connection
     // await prisma.$connect();
     // console.log('🗄️  Database connected');
@@ -265,6 +281,11 @@ async function gracefulShutdown(signal: string): Promise<void> {
   console.log(`\n🛑 ${signal} received. Shutting down gracefully...`);
 
   try {
+    // Stop EventBridge and close workers
+    const eventBridge = getEventBridgeService();
+    eventBridge.stopPolling();
+    await closeAllWorkers();
+
     // Close Redis connection
     await closeRedisConnection();
 
